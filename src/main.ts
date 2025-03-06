@@ -23,6 +23,11 @@ interface PRDetails {
   description: string;
 }
 
+interface AIReview {
+  lineNumber: number;
+  reviewComment: string;
+}
+
 async function getPRDetails(): Promise<PRDetails> {
   const { repository, number } = JSON.parse(
     readFileSync(process.env.GITHUB_EVENT_PATH || "", "utf8")
@@ -59,16 +64,16 @@ async function getDiff(
 async function analyzeCode(
   parsedDiff: File[],
   prDetails: PRDetails
-): Promise<Array<{ body: string; path: string; line: number }>> {
-  const comments: Array<{ body: string; path: string; line: number }> = [];
+): Promise<Array<{ body: string; path: string; position: number }>> {
+  const comments: Array<{ body: string; path: string; position: number }> = [];
 
   for (const file of parsedDiff) {
     if (file.to === "/dev/null") continue; // Ignore deleted files
     for (const chunk of file.chunks) {
       const prompt = createPrompt(file, chunk, prDetails);
-      const aiResponse = await getAIResponse(prompt);
-      if (aiResponse) {
-        const newComments = createComment(file, chunk, aiResponse);
+      const aiResponses = await getAIResponse(prompt);
+      if (aiResponses) {
+        const newComments = createComment(file, chunk, aiResponses);
         if (newComments) {
           comments.push(...newComments);
         }
@@ -80,17 +85,25 @@ async function analyzeCode(
 
 function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
   return `Your task is to review pull requests. Instructions:
-- Provide the response in following JSON format:  {"reviews": [{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}]}
+- Provide the response in the following JSON format:
+  {
+    "reviews": [
+      {
+        "lineNumber": <line_number>,
+        "reviewComment": "<review comment>"
+      }
+    ]
+  }
 - Do not give positive comments or compliments.
 - Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
 - Write the comment in GitHub Markdown format.
-- Use the given description only for the overall context and only comment the code.
+- Use the given description only for the overall context and only comment on the code.
 - IMPORTANT: NEVER suggest adding comments to the code.
 
 Review the following code diff in the file "${
     file.to
   }" and take the pull request title and description into account when writing the response.
-  
+
 Pull request title: ${prDetails.title}
 Pull request description:
 
@@ -103,17 +116,14 @@ Git diff to review:
 \`\`\`diff
 ${chunk.content}
 ${chunk.changes
-  // @ts-expect-error - ln and ln2 exists where needed
+  // @ts-expect-error - ln and ln2 exist where needed
   .map((c) => `${c.ln ? c.ln : c.ln2} ${c.content}`)
   .join("\n")}
 \`\`\`
 `;
 }
 
-async function getAIResponse(prompt: string): Promise<Array<{
-  lineNumber: string;
-  reviewComment: string;
-}> | null> {
+async function getAIResponse(prompt: string): Promise<AIReview[] | null> {
   const queryConfig = {
     model: OPENAI_API_MODEL,
     temperature: 0.2,
@@ -121,23 +131,27 @@ async function getAIResponse(prompt: string): Promise<Array<{
     top_p: 1,
     frequency_penalty: 0,
     presence_penalty: 0,
+    response_format: "json",
+    messages: [
+      {
+        role: "system",
+        content: prompt,
+      },
+    ],
   };
 
   try {
-    const response = await openai.chat.completions.create({
-      ...queryConfig,
-      // return JSON if the model supports it:
-      ...({ response_format: { type: "json_object" } }),
-      messages: [
-        {
-          role: "system",
-          content: prompt,
-        },
-      ],
-    });
-
-    const res = response.choices[0].message?.content?.trim() || "{}";
-    return JSON.parse(res).reviews;
+    const response = await openai.chat.completions.create(queryConfig);
+    const res =
+      response.choices[0].message?.content?.trim() || '{"reviews": []}';
+    const parsed = JSON.parse(res);
+    if (Array.isArray(parsed.reviews)) {
+      return parsed.reviews.map((review: any) => ({
+        lineNumber: Number(review.lineNumber),
+        reviewComment: review.reviewComment,
+      }));
+    }
+    return null;
   } catch (error) {
     console.error("Error:", error);
     return null;
@@ -147,28 +161,33 @@ async function getAIResponse(prompt: string): Promise<Array<{
 function createComment(
   file: File,
   chunk: Chunk,
-  aiResponses: Array<{
-    lineNumber: string;
-    reviewComment: string;
-  }>
-): Array<{ body: string; path: string; line: number }> {
+  aiResponses: AIReview[]
+): Array<{ body: string; path: string; position: number }> {
   return aiResponses.flatMap((aiResponse) => {
-    if (!file.to) {
+    if (!file.to || isNaN(aiResponse.lineNumber)) {
       return [];
     }
+    const position = getPositionFromLine(chunk, aiResponse.lineNumber);
+    if (position === null) return [];
     return {
       body: aiResponse.reviewComment,
       path: file.to,
-      line: Number(aiResponse.lineNumber),
+      position,
     };
   });
+}
+
+function getPositionFromLine(chunk: Chunk, lineNumber: number): number | null {
+  const start = chunk.newStart;
+  if (!start || lineNumber < 1) return null;
+  return start + lineNumber - 1;
 }
 
 async function createReviewComment(
   owner: string,
   repo: string,
   pull_number: number,
-  comments: Array<{ body: string; path: string; line: number }>
+  comments: Array<{ body: string; path: string; position: number }>
 ): Promise<void> {
   await octokit.pulls.createReview({
     owner,
@@ -245,3 +264,4 @@ main().catch((error) => {
   console.error("Error:", error);
   process.exit(1);
 });
+ 
