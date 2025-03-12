@@ -1,0 +1,38 @@
+name: Build and Release
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Setup Node.js"
+        uses: "actions/setup-node@v4"
+        with:
+          node-version: 20
+      
+      - name: Package
+        run: |
+          yarn run build
+          yarn run package
+
+      - uses: EndBug/add-and-commit@v9 # You can change this to use a specific version.
+        continue-on-error: true
+        with:
+          # The message for the commit.
+          # Default: 'Commit from GitHub Actions (name of the workflow)'
+          message: "new build package version"
+          default_author: github_actions
+
+     
