@@ -1,3 +1,4 @@
+// src/main.ts
 import { readFileSync } from "fs";
 import * as core from "@actions/core";
 import OpenAI from "openai";
@@ -124,14 +125,16 @@ ${chunk.changes
 }
 
 async function getAIResponse(prompt: string): Promise<AIReview[] | null> {
-  const queryConfig = {
+  const queryConfig: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
     model: OPENAI_API_MODEL,
     temperature: 0.2,
     max_tokens: 700,
     top_p: 1,
     frequency_penalty: 0,
     presence_penalty: 0,
-    response_format: "json",
+    response_format: {
+      type: 'json_object',
+    },
     messages: [
       {
         role: "system",
@@ -264,4 +267,3 @@ main().catch((error) => {
   console.error("Error:", error);
   process.exit(1);
 });
- 
