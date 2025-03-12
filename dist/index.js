@@ -42,6 +42,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+// src/main.ts
 const fs_1 = __nccwpck_require__(7147);
 const core = __importStar(__nccwpck_require__(2186));
 const openai_1 = __importDefault(__nccwpck_require__(47));
@@ -93,9 +94,9 @@ function analyzeCode(parsedDiff, prDetails) {
                 continue; // Ignore deleted files
             for (const chunk of file.chunks) {
                 const prompt = createPrompt(file, chunk, prDetails);
-                const aiResponse = yield getAIResponse(prompt);
-                if (aiResponse) {
-                    const newComments = createComment(file, chunk, aiResponse);
+                const aiResponses = yield getAIResponse(prompt);
+                if (aiResponses) {
+                    const newComments = createComment(file, chunk, aiResponses);
                     if (newComments) {
                         comments.push(...newComments);
                     }
@@ -107,15 +108,23 @@ function analyzeCode(parsedDiff, prDetails) {
 }
 function createPrompt(file, chunk, prDetails) {
     return `Your task is to review pull requests. Instructions:
-- Provide the response in following JSON format:  {"reviews": [{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}]}
+- Provide the response in the following JSON format:
+  {
+    "reviews": [
+      {
+        "lineNumber": <line_number>,
+        "reviewComment": "<review comment>"
+      }
+    ]
+  }
 - Do not give positive comments or compliments.
 - Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
 - Write the comment in GitHub Markdown format.
-- Use the given description only for the overall context and only comment the code.
+- Use the given description only for the overall context and only comment on the code.
 - IMPORTANT: NEVER suggest adding comments to the code.
 
 Review the following code diff in the file "${file.to}" and take the pull request title and description into account when writing the response.
-  
+
 Pull request title: ${prDetails.title}
 Pull request description:
 
@@ -128,7 +137,7 @@ Git diff to review:
 \`\`\`diff
 ${chunk.content}
 ${chunk.changes
-        // @ts-expect-error - ln and ln2 exists where needed
+        // @ts-expect-error - ln and ln2 exist where needed
         .map((c) => `${c.ln ? c.ln : c.ln2} ${c.content}`)
         .join("\n")}
 \`\`\`
@@ -144,16 +153,27 @@ function getAIResponse(prompt) {
             top_p: 1,
             frequency_penalty: 0,
             presence_penalty: 0,
+            response_format: {
+                type: 'json_object',
+            },
+            messages: [
+                {
+                    role: "system",
+                    content: prompt,
+                },
+            ],
         };
         try {
-            const response = yield openai.chat.completions.create(Object.assign(Object.assign(Object.assign({}, queryConfig), ({ response_format: { type: "json_object" } })), { messages: [
-                    {
-                        role: "system",
-                        content: prompt,
-                    },
-                ] }));
-            const res = ((_b = (_a = response.choices[0].message) === null || _a === void 0 ? void 0 : _a.content) === null || _b === void 0 ? void 0 : _b.trim()) || "{}";
-            return JSON.parse(res).reviews;
+            const response = yield openai.chat.completions.create(queryConfig);
+            const res = ((_b = (_a = response.choices[0].message) === null || _a === void 0 ? void 0 : _a.content) === null || _b === void 0 ? void 0 : _b.trim()) || '{"reviews": []}';
+            const parsed = JSON.parse(res);
+            if (Array.isArray(parsed.reviews)) {
+                return parsed.reviews.map((review) => ({
+                    lineNumber: Number(review.lineNumber),
+                    reviewComment: review.reviewComment,
+                }));
+            }
+            return null;
         }
         catch (error) {
             console.error("Error:", error);
@@ -163,15 +183,24 @@ function getAIResponse(prompt) {
 }
 function createComment(file, chunk, aiResponses) {
     return aiResponses.flatMap((aiResponse) => {
-        if (!file.to) {
+        if (!file.to || isNaN(aiResponse.lineNumber)) {
             return [];
         }
+        const position = getPositionFromLine(chunk, aiResponse.lineNumber);
+        if (position === null)
+            return [];
         return {
             body: aiResponse.reviewComment,
             path: file.to,
-            line: Number(aiResponse.lineNumber),
+            position,
         };
     });
+}
+function getPositionFromLine(chunk, lineNumber) {
+    const start = chunk.newStart;
+    if (!start || lineNumber < 1)
+        return null;
+    return start + lineNumber - 1;
 }
 function createReviewComment(owner, repo, pull_number, comments) {
     return __awaiter(this, void 0, void 0, function* () {
